@@ -10,7 +10,7 @@ load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
-PROMPT_TEMPLATE = """Write 3 casual sentences to a freelancer.
+PROMPT_TEMPLATE = """Write a short, casual outreach message to a freelancer.
 Contact: {name}, {role}, {source}
 Bio: {bio}
 Angle: {trigger_angle_text}
@@ -18,8 +18,9 @@ Angle: {trigger_angle_text}
 Rules:
 - Text only, no HTML/subject/greetings
 - Start like texting a coworker
+- Include exactly 2-3 short bullet points (using "- " prefix) explaining how we can help based on their Angle
 - Ban: streamline, optimize, leverage, synergy, chaos, minimalist, disruptive, bloated, revolutionary, game-changer
-- Max 60 words
+- Max 80 words total
 - Last line MUST be: auctron.in — completely free, no card needed"""
 
 TRIGGER_ANGLES = {
@@ -48,7 +49,7 @@ def generate_personalized_email(contact: dict) -> tuple[str, str]:
             model='gemini-2.5-flash',
             contents=prompt,
             config=types.GenerateContentConfig(
-                max_output_tokens=100, # Hard limit on output tokens
+                max_output_tokens=150, # Hard limit on output tokens
                 temperature=0.7
             )
         )
