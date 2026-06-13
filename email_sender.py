@@ -39,6 +39,8 @@ import os
 import sys
 import time
 import random
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timezone, timedelta
 
 import gspread
@@ -370,5 +372,28 @@ def run():
             time.sleep(120)
 
 
+# ── Health check server (keeps Railway from killing the container) ────────────
+
+class _HealthHandler(BaseHTTPRequestHandler):
+    """Tiny HTTP handler that returns 200 OK so Railway knows we're alive."""
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"Auctron email sender is running.")
+
+    def log_message(self, *args):
+        pass  # silence request logs
+
+
+def _start_health_server():
+    port = int(os.getenv("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), _HealthHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    print(f"  🩺 Health-check server listening on port {port}")
+
+
 if __name__ == "__main__":
+    _start_health_server()
     run()

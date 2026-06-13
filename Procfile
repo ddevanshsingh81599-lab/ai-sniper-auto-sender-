@@ -1,1 +1,1 @@
-worker: python email_sender.py
+web: python email_sender.py
