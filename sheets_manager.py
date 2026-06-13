@@ -22,11 +22,22 @@ class SheetsManager:
         self._ensure_headers()
 
     def _authenticate(self):
-        if not os.path.exists(self.credentials_path):
-            raise FileNotFoundError(f"Credentials file {self.credentials_path} not found.")
+        # Try loading from the environment variable first (for Railway)
+        cred_env = os.getenv("GOOGLE_CREDENTIALS")
         
-        credentials = Credentials.from_service_account_file(
-            self.credentials_path, scopes=SCOPES)
+        if cred_env:
+            import json
+            creds_info = json.loads(cred_env)
+            credentials = Credentials.from_service_account_info(creds_info, scopes=SCOPES)
+        elif os.path.exists(self.credentials_path):
+            # Fallback to local file
+            credentials = Credentials.from_service_account_file(self.credentials_path, scopes=SCOPES)
+        else:
+            raise FileNotFoundError(
+                "Google Sheets credentials not found. "
+                "Please provide GOOGLE_CREDENTIALS in env vars or credentials.json file."
+            )
+            
         return gspread.authorize(credentials)
 
     def _get_sheet(self):
