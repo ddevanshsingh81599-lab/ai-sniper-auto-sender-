@@ -193,47 +193,97 @@ def _random_delay() -> int:
 
 # ── Subject line generator ────────────────────────────────────────────────────
 
+# Large pool of human-sounding, lowercase subjects.
+# Gmail flags identical subjects sent in bulk — so we need variety.
+# Rules: no caps, no exclamation marks, no corporate words, max 6 words.
+
+_SUBJECT_POOL = [
+    # generic / curiosity
+    "quick question",
+    "one thing",
+    "honestly curious",
+    "random thought",
+    "quick thing",
+    "small ask",
+    "two minute question",
+    "not sure if this fits",
+    "might be useful",
+    "thought of you",
+    "no pitch just a question",
+    "this might help",
+    "one sec",
+    "wanted your take",
+    "you'd know better",
+    # invoicing / billing angle
+    "invoicing thing",
+    "billing question",
+    "gst stuff",
+    "about getting paid",
+    "payment headaches",
+    "invoice tool",
+    "freelancer billing",
+    # role-aware
+    "saw your work",
+    "your projects",
+    "your portfolio",
+    "fellow freelancer here",
+    "founder to founder",
+    "indie dev thing",
+    "designer question",
+    "dev to dev",
+    # soft ask
+    "would you try something",
+    "curious what you think",
+    "worth 3 minutes maybe",
+    "can i get your opinion",
+    "honest feedback",
+    "need a second pair of eyes",
+    "your honest take",
+]
+
+# Subjects that include the first name for extra personalization
+_SUBJECT_POOL_WITH_NAME = [
+    "{first_name} — quick question",
+    "{first_name} — one thing",
+    "{first_name} — curious about something",
+    "{first_name} — small ask",
+    "for {first_name}",
+    "hey {first_name} — quick thing",
+]
+
+
 def _make_subject(contact: dict) -> str:
     """
-    Generate a short, role-specific subject line.
-    Keeps it under 50 chars and human-sounding.
+    Pick a random subject line from a large pool.
+    ~30% chance of including their first name for personalization.
+    Never the same subject twice in a row (tracked in _last_subject).
     """
-    role   = (contact.get("role") or "").lower()
-    name   = (contact.get("name") or "").split()[0]   # first name only
-    source = (contact.get("source") or "").lower()
+    global _last_subject
 
-    if "designer" in role:
-        options = [
-            f"your design work",
-            f"quick thought on your portfolio",
-            f"seen your dribbble shots",
-        ]
-    elif "developer" in role or "dev" in role or "engineer" in role:
-        options = [
-            f"quick question",
-            f"your github projects",
-            f"indie dev thing",
-        ]
-    elif "founder" in role or "indie" in source:
-        options = [
-            f"honest question",
-            f"one thing about invoicing",
-            f"your product",
-        ]
-    elif "writer" in role or "content" in role:
-        options = [
-            f"quick thought",
-            f"your writing work",
-            f"one thing",
-        ]
+    first_name = (contact.get("name") or "").split()[0]
+
+    # 30% chance to use a name-personalized subject
+    if first_name and random.random() < 0.3:
+        pool = _SUBJECT_POOL_WITH_NAME
     else:
-        options = [
-            f"quick question",
-            f"one thing",
-            f"honestly curious",
-        ]
+        pool = _SUBJECT_POOL
 
-    return random.choice(options)
+    # Pick randomly, but avoid repeating the last subject
+    attempts = 0
+    while attempts < 5:
+        choice = random.choice(pool)
+        subj = choice.format(first_name=first_name) if "{first_name}" in choice else choice
+        if subj != _last_subject:
+            _last_subject = subj
+            return subj
+        attempts += 1
+
+    # Fallback (should never hit this)
+    _last_subject = subj
+    return subj
+
+
+_last_subject = ""
 
 
 # ── Daily counter ─────────────────────────────────────────────────────────────
