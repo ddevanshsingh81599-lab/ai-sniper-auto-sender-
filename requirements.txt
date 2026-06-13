@@ -1,0 +1,10 @@
+google-genai
+gspread
+google-auth
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib
+playwright
+beautifulsoup4
+python-dotenv
+requests
