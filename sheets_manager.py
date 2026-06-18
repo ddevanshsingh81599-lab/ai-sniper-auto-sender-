@@ -75,6 +75,10 @@ class SheetsManager:
             "Reply?",              # S
             "Signed Up?",          # T
             "Notes",               # U
+            # ── Email tracking ─────────────────────────────────────
+            "Email ID",            # V  UUID assigned at send time
+            "Opened?",             # W  ISO timestamp of first open
+            "Clicked?",            # X  ISO timestamp of first link click
         ]
         
         # Check if first row is empty
@@ -154,6 +158,10 @@ class SheetsManager:
             "",                                     # S  Reply?
             "",                                     # T  Signed Up?
             "",                                     # U  Notes
+            # ── Email tracking ──────────────────────────────────
+            "",                                     # V  Email ID (written by email_sender)
+            "",                                     # W  Opened?
+            "",                                     # X  Clicked?
         ]
 
         try:

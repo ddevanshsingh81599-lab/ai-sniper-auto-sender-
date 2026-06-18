@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from sheets_manager import SheetsManager
 from ai_agent import generate_personalized_email
 from profile_extractor import extract_profile
+from email_validator_utils import validate_email_address
 
 load_dotenv()
 
@@ -165,6 +166,7 @@ def main():
     skipped_duplicate = 0
     pushed_without_ai = 0
     skipped_business_email = 0
+    skipped_invalid_email = 0
 
     for contact in scraped_contacts:
         if added_today >= MAX_CONTACTS_PER_DAY:
@@ -205,6 +207,18 @@ def main():
             print(f"  ⏭️  Skipping {email} (business/agency email)")
             skipped_business_email += 1
             continue
+
+        # ── Email validation gate (syntax + DNS/MX) ──────────────────
+        is_valid, cleaned_email, rejection_reason = validate_email_address(
+            email, check_dns=True, check_business=False  # business already checked above
+        )
+        if not is_valid:
+            print(f"  ⏭️  Skipping {email} (invalid: {rejection_reason})")
+            skipped_invalid_email += 1
+            continue
+        # Use the cleaned/normalized email going forward
+        contact['email'] = cleaned_email
+        email = cleaned_email
 
         if sheets.is_duplicate(email):
             skipped_duplicate += 1
@@ -258,6 +272,7 @@ def main():
     print(f"  ✅ New contacts added:    {added_today}")
     print(f"  ⏭️  Skipped (no email):    {skipped_no_email}")
     print(f"  ⏭️  Skipped (business):    {skipped_business_email}")
+    print(f"  ⏭️  Skipped (invalid):     {skipped_invalid_email}")
     print(f"  ⏭️  Skipped (duplicate):   {skipped_duplicate}")
     print(f"  📭 Pushed (no AI email):  {pushed_without_ai}  ← fill manually in sheet")
     print(f"  📊 Breakdown: {sources_breakdown}")

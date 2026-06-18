@@ -26,7 +26,8 @@ load_dotenv()
 
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.send",
-    "https://www.googleapis.com/auth/gmail.modify",   # needed to read sent count
+    "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/gmail.readonly",
 ]
 
 
@@ -50,9 +51,12 @@ def _build_service():
     return build("gmail", "v1", credentials=creds)
 
 
-def send_email(to: str, subject: str, body: str) -> bool:
+def send_email(to: str, subject: str, body: str, html_body: str = None) -> bool:
     """
-    Send a plain-text email via Gmail API.
+    Send a plain-text (and optionally HTML) email via Gmail API.
+    When html_body is provided, sends a multipart/alternative message so
+    email clients render the HTML version (with tracking pixel + UTM links)
+    while plain-text clients still get the readable version.
     Returns True on success, False on failure.
     """
     from_email = os.getenv("SENDING_EMAIL", "")
@@ -67,7 +71,14 @@ def send_email(to: str, subject: str, body: str) -> bool:
         msg["From"]    = from_email
         msg["To"]      = to
         msg["Subject"] = subject
+
+        # Plain text part (always included — fallback for plain-text clients)
         msg.attach(MIMEText(body, "plain"))
+
+        # HTML part — carries tracking pixel + UTM links
+        # Must be attached LAST so email clients prefer it over plain text
+        if html_body:
+            msg.attach(MIMEText(html_body, "html"))
 
         raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
         service.users().messages().send(

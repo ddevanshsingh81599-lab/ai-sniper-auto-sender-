@@ -91,21 +91,33 @@ def _extract_email_from_html(html: str) -> str:
     Priority 1 → mailto: links (user intentionally put it there).
     Priority 2 → bare email pattern anywhere in the page.
     """
+    def _clean_email(email: str) -> str:
+        """Strip common scraping artifacts from extracted emails."""
+        # Fix "Emailfoo@bar.com" — label text concatenated with email
+        if email.startswith("Email") and not email.startswith("Email@"):
+            email = email[5:]
+        # Fix "mailto:" prefix remnants
+        if email.startswith("mailto:"):
+            email = email[7:]
+        return email.strip()
+
     # Priority 1: mailto links
     for email in re.findall(
         r'mailto:([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})',
         html, re.IGNORECASE
     ):
-        if _is_valid_email(email):
-            return email
+        cleaned = _clean_email(email)
+        if _is_valid_email(cleaned):
+            return cleaned
 
     # Priority 2: bare email anywhere
     for email in re.findall(
         r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}',
         html
     ):
-        if _is_valid_email(email):
-            return email
+        cleaned = _clean_email(email)
+        if _is_valid_email(cleaned):
+            return cleaned
 
     return ""
 

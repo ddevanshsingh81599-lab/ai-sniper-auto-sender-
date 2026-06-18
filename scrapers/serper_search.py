@@ -150,6 +150,16 @@ def scrape_serper(limit_per_query=5):
             )
             if email_match:
                 email = email_match.group(0)
+                # Fix "Emailfoo@bar.com" — label text from HTML
+                if email.startswith("Email") and not email.startswith("Email@"):
+                    email = email[5:]
+                # Quick validate (no DNS — too slow for scraping loop)
+                from email_validator_utils import validate_email_quick
+                is_valid, cleaned, reason = validate_email_quick(email)
+                if is_valid:
+                    email = cleaned
+                else:
+                    email = ""  # skip garbage
 
             # Clean up name from title
             name = title.split("|")[0].split("-")[0].split("·")[0].strip()

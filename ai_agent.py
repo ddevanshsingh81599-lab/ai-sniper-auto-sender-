@@ -40,30 +40,36 @@ simplicity     → mention 3 minutes
 Write the email following this structure:
 
 Line 1:
-→ one observation about their work
-→ specific not generic
+→ one observation about their actual work
+→ extremely specific to their role/bio, not generic ("could be sent to anyone" is bad)
+→ do NOT start with "you're" or "you are" — it's an awkward opener
 → not a compliment just an observation
-→ reference their actual role or bio
 → lowercase start
 
 Line 2:
 → one sentence about what you built
-→ mention the real human reason
-→ not corporate speak
-→ connect to their specific pain point
-   naturally not directly
+→ mention the real human reason (e.g., "built it because I was spending more time on billing than shipping")
+→ not corporate speak (no "compliance", "a breeze")
+→ connect to their specific pain point naturally
 
 Line 3:
-→ one small ask
-→ not "sign up" or "check this out"
-→ "would you give it a look"
-→ or "curious what you think"
-→ or "worth 3 minutes if billing
-      is ever annoying"
+→ one ask with clear direction
+→ not a weak ask like "curious what you think"
+→ e.g., "worth a look if invoicing takes more than 10 minutes of your week"
 
 Final line:
 → your first name only: Devansh
 → then on next line: auctron.in
+
+Example of a PERFECT email:
+building full-stack products and managing GST at the same time is genuinely painful
+
+made an invoicing tool that handles the GST calculation automatically — built it because I was spending more time on billing than shipping
+
+worth a look if invoicing takes more than 10 minutes of your week
+
+Devansh
+auctron.in
 
 Strict rules:
 → plain text only
@@ -74,7 +80,7 @@ Strict rules:
 → no "Hi" or "Hey" or "Dear"
    start directly with observation
 → contractions always
-   don't I've you're it's
+   don't I've it's
 → never start with word "I"
 → use one of these once maximum:
    "honestly" "actually" "tbh"
@@ -90,6 +96,7 @@ would love to don't hesitate
 please feel free best regards
 looking forward to touching base
 reaching out I hope this finds you
+breeze compliance you're
 
 Output:
 → email body text only
@@ -129,12 +136,12 @@ def generate_personalized_email(contact: dict) -> tuple[str, str]:
         location=contact.get("location", "India")[:30],
     )
 
-    max_retries = 2
+    max_retries = 3
     for attempt in range(max_retries + 1):
         try:
             from google.genai import types
             response = client.models.generate_content(
-                model='gemini-2.5-flash',
+                model='gemini-3.5-flash',
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     max_output_tokens=1024,
@@ -144,8 +151,10 @@ def generate_personalized_email(contact: dict) -> tuple[str, str]:
                     )
                 )
             )
-            text = response.text.strip()
-
+            raw_text = getattr(response, "text", "") or ""
+            text = str(raw_text).strip()
+            if not text:
+                raise ValueError("Empty response text from Gemini")
             # Quality check: must be reasonable length and end with auctron.in
             if len(text) < 50:
                 print(f"  ⚠️  Short output (attempt {attempt+1}), retrying...")
@@ -154,11 +163,15 @@ def generate_personalized_email(contact: dict) -> tuple[str, str]:
 
             return text, best_angle
         except Exception as e:
+            if "429" in str(e):
+                print(f"  ⚠️  Rate limit (429) hit for {contact.get('name')}. Waiting 20s and retrying...")
+                time.sleep(20)
+                continue
             print(f"Error generating email for {contact.get('name')}: {e}")
             return f"ERROR: {str(e)}", "N/A"
         finally:
-            # Free tier = 5 req/min → sleep 13s after every call to stay safely under
-            time.sleep(13)
+            # Sleep to pace ourselves under RPM limits
+            time.sleep(5)
 
     # All retries exhausted
     return "PENDING", "N/A"

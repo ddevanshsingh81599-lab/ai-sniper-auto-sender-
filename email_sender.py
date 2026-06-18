@@ -38,6 +38,7 @@ Usage:
 import os
 import sys
 import time
+import uuid
 import random
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -48,6 +49,8 @@ from google.oauth2.service_account import Credentials
 from dotenv import load_dotenv
 
 from gmail_sender import send_email
+from email_validator_utils import validate_email_quick
+from email_tracker import inject_tracking, register_email_id, start_tracker_server
 
 load_dotenv()
 
@@ -61,20 +64,36 @@ POLL_INTERVAL_SEC = 5  * 60   # 5 minutes (when idle / waiting for next window)
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
-# Sheet column indices (0-based)
-COL_NAME       = 0
-COL_EMAIL      = 1
-COL_ROLE       = 2
-COL_SOURCE     = 3
-COL_AI_EMAIL   = 13   # N
-COL_ANGLE      = 14   # O  — we write subject here too
-COL_SENT       = 17   # R
+# ── Sheet column indices (0-based for reading rows) ─────────────────────────
+# Confirmed from live sheet audit 2026-06-18:
+#   A=Full Name  B=Email  C=Role  D=Source  E=Bio
+#   F=AI Draft   G=AngleCode  H=ProfileURL  I=DateAdded
+#   J=Segment    K=PainPoints  L=CurrentTools  M=ClientType
+#   N=AI Generated Email (REAL)   O=Subject Sent
+#   P=Experience  Q=BestAngle
+#   R=Sent?   S=Reply?   T=SignedUp?   U=Notes
+#   V=Email ID   W=Opened?   X=Clicked?
+COL_NAME       = 0    # A
+COL_EMAIL      = 1    # B
+COL_ROLE       = 2    # C
+COL_SOURCE     = 3    # D
+COL_AI_EMAIL   = 13   # N — real full AI email
+COL_ANGLE      = 14   # O — subject line used
+COL_SENT       = 17   # R — sent timestamp
 
-# gspread column numbers (1-based) for update calls
-GCOL_ANGLE     = 15   # O
-GCOL_SENT      = 18   # R
+# ── gspread column numbers (1-based) for update calls ───────────────────────
+GCOL_ANGLE     = 15   # O — subject sent
+GCOL_SENT      = 18   # R — sent timestamp
+GCOL_REPLY     = 19   # S — reply timestamp (written by reply_monitor)
+GCOL_NOTES     = 21   # U — notes / confidence
+GCOL_EMAIL_ID  = 22   # V — UUID for tracking
+GCOL_OPENED    = 23   # W — open pixel timestamp
+GCOL_CLICKED   = 24   # X — click timestamp
 
-SHEET_RANGE    = "A2:U"
+# Tracker base URL — set this to your Railway/public URL
+TRACKER_BASE_URL = os.getenv("TRACKER_BASE_URL", "http://localhost:8082")
+
+SHEET_RANGE    = "A2:X"
 DRY_RUN        = "--dry-run" in sys.argv
 
 SCOPES = [
@@ -136,10 +155,16 @@ def _get_next_contact(sheet):
         if not email:
             continue
 
+        # Quick email validation safety net
+        is_valid, cleaned, reason = validate_email_quick(email)
+        if not is_valid:
+            print(f"  ⚠️  Skipping row {i + 2}: {email} — {reason}")
+            continue
+
         return i + 2, {   # +2 because sheet is 1-based and we skip header
             "row":      i + 2,
             "name":     row[COL_NAME].strip(),
-            "email":    email,
+            "email":    cleaned,  # use validated/cleaned email
             "role":     row[COL_ROLE].strip(),
             "source":   row[COL_SOURCE].strip(),
             "ai_email": ai_email,
@@ -149,9 +174,9 @@ def _get_next_contact(sheet):
     return None, None
 
 
-def _mark_sent(sheet, row_number: int, subject: str):
+def _mark_sent(sheet, row_number: int, subject: str, email_id: str):
     """
-    Write the sent date to col R and the subject line to col O.
+    Write the sent date to col R, subject line to col O, and email_id to col V.
     """
     date_str = datetime.now(IST).strftime("%Y-%m-%d %H:%M IST")
 
@@ -159,6 +184,9 @@ def _mark_sent(sheet, row_number: int, subject: str):
     sheet.update_cell(row_number, GCOL_ANGLE, subject)
     # Update col R (Sent?)
     sheet.update_cell(row_number, GCOL_SENT,  date_str)
+    # Update col V (Email ID for tracking)
+    if email_id:
+        register_email_id(sheet, row_number, email_id)
 
 
 # ── Time helpers ──────────────────────────────────────────────────────────────
@@ -383,13 +411,20 @@ def run():
                 time.sleep(5)
                 continue
 
-            success = send_email(to=to_email, subject=subject, body=body)
+            # ── Generate unique tracking ID ─────────────────────────
+            email_id = str(uuid.uuid4())
+
+            # ── Inject tracking pixel + UTM links ───────────────────
+            html_body = inject_tracking(body, email_id, TRACKER_BASE_URL)
+
+            success = send_email(to=to_email, subject=subject, body=body, html_body=html_body)
 
             if success:
-                _mark_sent(sheet, row_number, subject)
+                _mark_sent(sheet, row_number, subject, email_id)
                 _sent_today += 1
                 print(
                     f"  ✅ Sent {_sent_today}/{DAILY_LIMIT} → {to_email}"
+                    f"  [tracking ID: {email_id[:8]}…]"
                 )
 
                 # ── Human-like delay before next send ───────────────
@@ -422,28 +457,18 @@ def run():
             time.sleep(120)
 
 
-# ── Health check server (keeps Railway from killing the container) ────────────
-
-class _HealthHandler(BaseHTTPRequestHandler):
-    """Tiny HTTP handler that returns 200 OK so Railway knows we're alive."""
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain")
-        self.end_headers()
-        self.wfile.write(b"Auctron email sender is running.")
-
-    def log_message(self, *args):
-        pass  # silence request logs
-
-
-def _start_health_server():
-    port = int(os.getenv("PORT", 8080))
-    server = HTTPServer(("0.0.0.0", port), _HealthHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    print(f"  🩺 Health-check server listening on port {port}")
+# Health checks are now handled directly by the tracker server's /health endpoint
 
 
 if __name__ == "__main__":
-    _start_health_server()
+    # 1. Start the email tracking server (also acts as the Render health check on $PORT)
+    start_tracker_server()
+    
+    # 2. Start the Reply Monitor in a background thread
+    import reply_monitor
+    monitor_thread = threading.Thread(target=reply_monitor.run, daemon=True)
+    monitor_thread.start()
+    print("  🔁 Reply Monitor started in background.")
+    
+    # 3. Start the Sender loop in the main thread
     run()

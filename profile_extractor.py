@@ -102,51 +102,60 @@ def extract_profile(contact: dict) -> dict:
         website=contact.get("url", "none") or "none",
     )
 
-    try:
-        from google.genai import types
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                max_output_tokens=300,
-                temperature=0.2,      # low temp → consistent structured output
-            ),
-        )
-        raw = response.text.strip()
+    max_retries = 3
+    for attempt in range(max_retries + 1):
+        try:
+            from google.genai import types
+            response = client.models.generate_content(
+                model="gemini-3.5-flash",
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    max_output_tokens=300,
+                    temperature=0.2,      # low temp → consistent structured output
+                    response_mime_type="application/json",
+                ),
+            )
+            raw_text = getattr(response, "text", "") or ""
+            raw = str(raw_text).strip()
+            if not raw:
+                raise ValueError("Empty response text from Gemini")
+            # Strip markdown fences if the model wrapped the JSON
+            raw = raw.replace("```json", "").replace("```", "").strip()
 
-        # Strip markdown fences if the model wrapped the JSON
-        raw = raw.replace("```json", "").replace("```", "").strip()
+            extracted = json.loads(raw)
 
-        extracted = json.loads(raw)
+            # Flatten list fields into pipe-delimited strings for Sheets
+            pain_points = extracted.get("painPoints", [])
+            if isinstance(pain_points, list):
+                pain_points_str = " | ".join(str(p) for p in pain_points if p)
+            else:
+                pain_points_str = str(pain_points)
 
-        # Flatten list fields into pipe-delimited strings for Sheets
-        pain_points = extracted.get("painPoints", [])
-        if isinstance(pain_points, list):
-            pain_points_str = " | ".join(str(p) for p in pain_points if p)
-        else:
-            pain_points_str = str(pain_points)
+            current_tools = extracted.get("currentTools", [])
+            if isinstance(current_tools, list):
+                current_tools_str = " | ".join(str(t) for t in current_tools if t)
+            else:
+                current_tools_str = str(current_tools)
 
-        current_tools = extracted.get("currentTools", [])
-        if isinstance(current_tools, list):
-            current_tools_str = " | ".join(str(t) for t in current_tools if t)
-        else:
-            current_tools_str = str(current_tools)
+            return {
+                "segment":      extracted.get("segment", "unknown"),
+                "painPoints":   pain_points_str or "unknown",
+                "currentTools": current_tools_str or "unknown",
+                "clientType":   extracted.get("clientType", "unknown"),
+                "experience":   extracted.get("experience", "unknown"),
+                "bestAngle":    extracted.get("bestAngle", "simplicity"),
+                "isFreelancer": bool(extracted.get("isFreelancer", True)),
+                "confidence":   extracted.get("confidence", "low"),
+            }
 
-        return {
-            "segment":      extracted.get("segment", "unknown"),
-            "painPoints":   pain_points_str or "unknown",
-            "currentTools": current_tools_str or "unknown",
-            "clientType":   extracted.get("clientType", "unknown"),
-            "experience":   extracted.get("experience", "unknown"),
-            "bestAngle":    extracted.get("bestAngle", "simplicity"),
-            "isFreelancer": bool(extracted.get("isFreelancer", True)),
-            "confidence":   extracted.get("confidence", "low"),
-        }
-
-    except (json.JSONDecodeError, Exception) as e:
-        print(f"  ⚠️  Profile extractor failed for {contact.get('name', '?')}: {e}")
-        return DEFAULT_EXTRACTION.copy()
-    finally:
-        # Free tier: 5 req/min → 13 s gap keeps us under the cap
-        # (ai_agent.py has its own identical sleep for the email call)
-        time.sleep(13)
+        except Exception as e:
+            if "429" in str(e):
+                print(f"  ⚠️  Profile extractor rate limit hit for {contact.get('name', '?')}. Waiting 20s...")
+                time.sleep(20)
+                continue
+            print(f"  ⚠️  Profile extractor failed for {contact.get('name', '?')}: {e}")
+            return DEFAULT_EXTRACTION.copy()
+        finally:
+            time.sleep(5)
+            
+    return DEFAULT_EXTRACTION.copy()
