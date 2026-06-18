@@ -1,1 +1,1 @@
-web: python email_sender.py
+web: python3 email_sender.py
