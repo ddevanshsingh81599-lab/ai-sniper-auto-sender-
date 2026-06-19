@@ -294,35 +294,41 @@ def _send_alert(name: str, email: str, body_preview: str):
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-def run():
-    print("=" * 60)
-    print("  AUCTRON — HOT LEAD FOLLOW-UP SENDER")
-    print(f"  {datetime.now(IST).strftime('%Y-%m-%d %H:%M IST')}")
-    if DRY_RUN:
-        print("  ⚠️  DRY-RUN — no emails will be sent")
-    if SHOW_ONLY:
-        print("  ℹ️  SHOW-ONLY — just listing, no sends")
-    print("=" * 60)
+def run(silent_mode: bool = False):
+    if not silent_mode:
+        print("=" * 60)
+        print("  AUCTRON — HOT LEAD FOLLOW-UP SENDER")
+        print(f"  {datetime.now(IST).strftime('%Y-%m-%d %H:%M IST')}")
+        if DRY_RUN:
+            print("  ⚠️  DRY-RUN — no emails will be sent")
+        if SHOW_ONLY:
+            print("  ℹ️  SHOW-ONLY — just listing, no sends")
+        print("=" * 60)
 
-    # ── 1. Connect ────────────────────────────────────────────────
-    print("\n[1/3] Connecting to Google Sheets...")
+    # ── 1. Connect ─────────────────────────────────────────────────────
+    if not silent_mode:
+        print("\n[1/3] Connecting to Google Sheets...")
     sheet = _get_sheet()
-    print("  ✅ Sheet connected")
+    if not silent_mode:
+        print("  ✅ Sheet connected")
 
     if not DRY_RUN and not SHOW_ONLY:
-        print("[1/3] Connecting to Gmail...")
+        if not silent_mode:
+            print("[1/3] Connecting to Gmail...")
         gmail = _build_gmail()
-        print("  ✅ Gmail connected")
+        if not silent_mode:
+            print("  ✅ Gmail connected")
     else:
         gmail = None
 
-    # ── 2. Find hot leads ─────────────────────────────────────────
-    print("\n[2/3] Scanning for hot leads (opened or clicked, no reply)...")
+    # ── 2. Find hot leads ─────────────────────────────────────────────
+    if not silent_mode:
+        print("\n[2/3] Scanning for hot leads (opened or clicked, no reply)...")
     hot_leads = _load_hot_leads(sheet)
 
     if not hot_leads:
-        print("\n  📭 No hot leads found right now.")
-        print("  (Everyone who opened/clicked has already replied or been followed up.)")
+        if not silent_mode:
+            print("\n  📫 No hot leads found right now.")
         return
 
     print(f"\n  🔥 Found {len(hot_leads)} hot lead(s) to follow up:\n")

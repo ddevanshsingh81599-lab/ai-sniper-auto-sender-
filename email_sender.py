@@ -460,15 +460,51 @@ def run():
 # Health checks are now handled directly by the tracker server's /health endpoint
 
 
+# ── Auto Follow-up Loop ───────────────────────────────────────────────────────
+# Runs inside a background thread every FOLLOWUP_INTERVAL_SEC.
+# Automatically emails anyone who clicked/opened but hasn't replied,
+# so zero manual intervention needed when hot leads appear.
+
+FOLLOWUP_INTERVAL_SEC = 60 * 60   # check every 1 hour
+
+
+def _followup_loop():
+    """
+    Background thread: every hour, scan the sheet for hot leads
+    (opened or clicked, no reply, not yet followed up) and send
+    a short warm follow-up email via Gmail.
+    Integrated from followup_sender.py.
+    """
+    import followup_sender
+    # Stagger start by 5 min so it doesn't race with the sender on startup
+    time.sleep(5 * 60)
+    print("  🔥 Follow-up loop started (runs every 60 min).")
+
+    while True:
+        try:
+            now_str = _ist_now().strftime("%H:%M IST")
+            print(f"  [{now_str}] Follow-up loop: scanning for hot leads...")
+            followup_sender.run(silent_mode=True)
+        except Exception as e:
+            print(f"  ⚠️  Follow-up loop error: {e}")
+        time.sleep(FOLLOWUP_INTERVAL_SEC)
+
+
 if __name__ == "__main__":
     # 1. Start the email tracking server (also acts as the Render health check on $PORT)
     start_tracker_server()
-    
+
     # 2. Start the Reply Monitor in a background thread
     import reply_monitor
     monitor_thread = threading.Thread(target=reply_monitor.run, daemon=True)
     monitor_thread.start()
     print("  🔁 Reply Monitor started in background.")
-    
-    # 3. Start the Sender loop in the main thread
+
+    # 3. Start the Follow-up sender loop in a background thread
+    #    → auto-emails anyone who opened/clicked but hasn't replied
+    followup_thread = threading.Thread(target=_followup_loop, daemon=True)
+    followup_thread.start()
+    print("  🔥 Follow-up loop started in background (runs every 60 min).")
+
+    # 4. Start the main Sender loop in the main thread
     run()
