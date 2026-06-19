@@ -9,7 +9,7 @@ Endpoints:
   GET /track/click?id=<email_id>   → records click in Sheet col X, then 301-redirects to target URL
   GET /health                      → returns 200 OK
 
-Sheet tracking columns (appended to the right of existing 21 cols):
+Sheet tracking columns:
   V  Email ID   — UUID assigned at send time
   W  Opened?    — ISO timestamp of first open
   X  Clicked?   — ISO timestamp of first click
@@ -23,21 +23,33 @@ HOW IT WORKS:
   5. When Gmail loads the email, the pixel fires → open is recorded.
   6. When the recipient clicks a link → click is recorded + redirect happens.
 
+FIXES (2026-06-19):
+  - BUG FIX 1: _record_open/_record_click now fall back to a live sheet scan
+    when the email_id is NOT in the in-memory cache (handles Render cold-starts
+    and any cache-miss where 5 real clicks were silently dropped).
+  - BUG FIX 2: inject_tracking now matches ALL URL forms:
+      https://auctron.net.in, http://auctron.net.in, auctron.net.in,
+      www.auctron.net.in — without requiring https:// prefix.
+  - BUG FIX 3: inject_tracking no longer produces broken double-encoded hrefs.
+    The HTML <a href> is built cleanly in a single pass.
+  - BUG FIX 4: Plain-text bare URLs (no scheme) are normalised to https://
+    before wrapping so UTM params are valid and Clarity receives them correctly.
+
 Environment variables:
   TRACKER_BASE_URL   — e.g. https://auctron-tracker.railway.app
-                        (the public URL of this server)
   PORT               — port to listen on (default 8080 or TRACKER_PORT)
   GOOGLE_SHEET_ID    — same as email_sender.py
   GOOGLE_CREDENTIALS — same as email_sender.py
 """
 
 import os
+import re
 import json
 import time
 import threading
 from datetime import datetime, timezone, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse, parse_qs, urlencode, quote
+from urllib.parse import urlparse, parse_qs, quote
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -59,7 +71,6 @@ PIXEL_GIF = bytes([
 GCOL_EMAIL_ID = 22   # V
 GCOL_OPENED   = 23   # W
 GCOL_CLICKED  = 24   # X
-SHEET_RANGE   = "A2:X"
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -79,7 +90,7 @@ def _get_sheet():
     return gspread.authorize(creds).open_by_key(sheet_id).sheet1
 
 
-# ── In-memory ID→row cache (refreshed from sheet on startup) ──────────────────
+# ── In-memory ID→row cache ────────────────────────────────────────────────────
 #
 # Structure: { email_id: {"row": int, "opened": bool, "clicked": bool} }
 _id_cache: dict = {}
@@ -105,12 +116,49 @@ def _load_id_cache(sheet):
     print(f"  📧 Tracker cache loaded — {len(new_cache)} tracked emails.")
 
 
+def _find_row_by_id_fallback(email_id: str):
+    """
+    FIX #1: Cache-miss fallback.
+    When the in-memory cache doesn't have the email_id (e.g. after a cold
+    start / Render restart), do a live sheet scan to find it.
+    Returns {"row": int, "opened": bool, "clicked": bool} or None.
+    """
+    try:
+        sheet = _get_sheet()
+        rows = sheet.get("A2:X") or []
+        for i, row in enumerate(rows):
+            row = row + [""] * (24 - len(row))
+            if row[21].strip() == email_id:
+                entry = {
+                    "row":     i + 2,
+                    "opened":  bool(row[22].strip()),
+                    "clicked": bool(row[23].strip()),
+                }
+                # Warm the cache so subsequent events are instant
+                with _cache_lock:
+                    _id_cache[email_id] = entry
+                print(f"  🔍 Cache-miss fallback: found ID {email_id[:8]}… at row {entry['row']}")
+                return entry
+    except Exception as e:
+        print(f"  ⚠️  Fallback sheet scan failed: {e}")
+    return None
+
+
 def _record_open(email_id: str):
     """Write open timestamp to col W for the given email_id."""
     with _cache_lock:
         entry = _id_cache.get(email_id)
-    if not entry or entry["opened"]:
-        return   # not found, or already recorded
+
+    # FIX #1: If not in cache, do a live lookup
+    if not entry:
+        entry = _find_row_by_id_fallback(email_id)
+
+    if not entry:
+        print(f"  ⚠️  Open: email_id {email_id[:8]}… not found in sheet.")
+        return
+    if entry.get("opened"):
+        return  # already recorded — idempotent
+
     try:
         sheet = _get_sheet()
         ts = datetime.now(IST).strftime("%Y-%m-%d %H:%M IST")
@@ -126,8 +174,17 @@ def _record_click(email_id: str):
     """Write click timestamp to col X for the given email_id."""
     with _cache_lock:
         entry = _id_cache.get(email_id)
-    if not entry or entry["clicked"]:
+
+    # FIX #1: If not in cache, do a live lookup
+    if not entry:
+        entry = _find_row_by_id_fallback(email_id)
+
+    if not entry:
+        print(f"  ⚠️  Click: email_id {email_id[:8]}… not found in sheet.")
         return
+    if entry.get("clicked"):
+        return  # already recorded — idempotent
+
     try:
         sheet = _get_sheet()
         ts = datetime.now(IST).strftime("%Y-%m-%d %H:%M IST")
@@ -165,8 +222,10 @@ class _TrackHandler(BaseHTTPRequestHandler):
             target_url = (params.get("url") or ["https://auctron.net.in"])[0]
             if email_id:
                 threading.Thread(target=_record_click, args=(email_id,), daemon=True).start()
+            # Redirect immediately — don't wait for the sheet write
             self.send_response(301)
             self.send_header("Location", target_url)
+            self.send_header("Cache-Control", "no-store, no-cache")
             self.end_headers()
 
         elif path in ("/health", ""):
@@ -198,62 +257,80 @@ def register_email_id(sheet, row_number: int, email_id: str):
         print(f"  ⚠️  Failed to write email_id to sheet: {e}")
 
 
+# ── FIX #2, #3, #4: Completely rewritten inject_tracking ─────────────────────
+
+# Matches ALL auctron URL forms, with or without scheme, with or without www:
+#   https://auctron.net.in/...   http://auctron.net.in   auctron.net.in
+#   https://www.auctron.in/...   auctron.in
+_AUCTRON_URL_PATTERN = re.compile(
+    r'(?:https?://)?'                       # optional scheme
+    r'(?:www\.)?'                           # optional www
+    r'(?:auctron\.net\.in|auctron\.in)'     # domain
+    r'(?:/[^\s\)\]"\'<>]*)?',              # optional path
+    re.IGNORECASE
+)
+
+
+def _normalise_url(raw: str) -> str:
+    """
+    FIX #4: Ensure the URL has an https:// scheme.
+    Bare URLs like 'auctron.net.in' become 'https://auctron.net.in'.
+    """
+    if not raw.startswith("http://") and not raw.startswith("https://"):
+        return "https://" + raw
+    return raw
+
+
 def inject_tracking(body: str, email_id: str, base_url: str) -> str:
     """
     Takes a plain-text email body and returns an HTML email body that:
-      1. Wraps the plain text in a minimal HTML shell
-      2. Rewrites all auctron.in / auctron.net.in links to click-tracking URLs
-      3. Appends a hidden 1x1 tracking pixel at the very bottom
-      4. Also adds UTM parameters to every link
-    """
-    import re
+      1. Wraps the plain text in a minimal HTML shell.
+      2. Rewrites ALL auctron.in / auctron.net.in links (with or without
+         https://) to click-tracking redirect URLs.
+      3. Adds UTM parameters: utm_source, utm_medium, utm_campaign, utm_content.
+      4. Appends a hidden 1×1 tracking pixel at the very bottom.
 
+    FIX summary:
+      - Regex now matches bare URLs without https:// prefix (FIX #2 + #4).
+      - HTML link rewrite is done in a single clean pass — no double-encoding (FIX #3).
+      - click_url uses plain & not &amp; in the href (FIX #3).
+    """
     tracker_base = base_url.rstrip("/")
 
     # Build the pixel img tag
     pixel_url  = f"{tracker_base}/track/open?id={email_id}"
     pixel_html = f'<img src="{pixel_url}" width="1" height="1" style="display:none" alt="" />'
 
-    # Rewrite all auctron links: add UTM + wrap in click tracker
-    AUCTRON_DOMAINS = ["auctron.in", "auctron.net.in", "www.auctron.in"]
+    utm_params = (
+        f"utm_source=auctron"
+        f"&utm_medium=email"
+        f"&utm_campaign=cold_outreach"
+        f"&utm_content={email_id[:8]}"
+    )
 
-    def _rewrite_link(match):
-        url = match.group(0)
-        # Add UTM params
-        sep = "&" if "?" in url else "?"
-        utm = f"utm_source=auctron&utm_medium=email&utm_campaign=cold_outreach&utm_content={email_id[:8]}"
-        tracked_dest = url + sep + utm
-        # Wrap in click tracker
-        click_url = f"{tracker_base}/track/click?id={email_id}&url={quote(tracked_dest, safe='')}"
-        return click_url
+    def _rewrite(match):
+        """
+        FIX #3: Single-pass, clean rewrite.
+        Returns an <a href="..."> element with the click-tracking URL.
+        The final destination already has UTM params appended.
+        The entire destination URL is percent-encoded so &utm_ params
+        don't bleed into the outer tracker query string.
+        """
+        raw_url = match.group(0)
+        canonical = _normalise_url(raw_url)            # ensure https://
+        sep = "&" if "?" in canonical else "?"
+        dest_with_utm = canonical + sep + utm_params   # add UTM to destination
+        # quote(safe='') encodes ALL special chars including & = ? in the dest
+        encoded_dest = quote(dest_with_utm, safe="")
+        # plain & (not &amp;) in the href — HTML parser handles it fine
+        click_url = f"{tracker_base}/track/click?id={email_id}&url={encoded_dest}"
+        return f'<a href="{click_url}">{raw_url}</a>'
 
-    # Match http(s) URLs containing any auctron domain
-    pattern = r'https?://(?:www\.)?(?:auctron\.in|auctron\.net\.in)[^\s\)\]"\'<>]*'
-    body_rewritten = re.sub(pattern, _rewrite_link, body)
+    # Minimal HTML escape of the body (only & needs escaping before link rewrite)
+    safe_body = body.replace("&", "&amp;")
 
-    # Convert plain text to simple HTML (preserve line breaks)
-    html_body = body_rewritten.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    # Restore the click tracking URLs we just inserted (they contain < etc.)
-    # Actually: let's build the HTML differently — wrap raw text, then inject links
-    # Simpler: escape first, then do link rewriting on the escaped text
-    # Re-do: escape the original body first, then rewrite links in the escaped version
-
-    safe_body = body.replace("&", "&amp;")   # minimal escape for HTML
-
-    def _rewrite_link_html(match):
-        url = match.group(0)
-        sep = "&amp;" if "?" in url else "?"
-        utm = (
-            f"utm_source=auctron&amp;utm_medium=email"
-            f"&amp;utm_campaign=cold_outreach&amp;utm_content={email_id[:8]}"
-        )
-        tracked_dest = url + sep + utm
-        click_url = f"{tracker_base}/track/click?id={email_id}&amp;url={quote(tracked_dest.replace('&amp;','&'), safe='')}"
-        return f'<a href="{click_url}">{url}</a>'
-
-    # Rewrite auctron links with HTML-safe href
-    html_pattern = r'https?://(?:www\.)?(?:auctron\.in|auctron\.net\.in)[^\s\)\]"\'<>]*'
-    safe_body = re.sub(html_pattern, _rewrite_link_html, safe_body)
+    # Apply link rewriting to the escaped body
+    safe_body = _AUCTRON_URL_PATTERN.sub(_rewrite, safe_body)
 
     # Convert newlines → <br>
     safe_body = safe_body.replace("\n", "<br>\n")
