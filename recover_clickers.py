@@ -96,32 +96,98 @@ def _load_rows(sheet):
 
 # ── Render log fetching ───────────────────────────────────────────────────────
 
-def _fetch_render_logs(service_id: str, api_key: str, limit: int = 500) -> list[str]:
+def _discover_render_ids(api_key: str) -> tuple[str, str]:
     """
-    Fetch recent logs from Render API.
-    Returns list of raw log lines.
+    Auto-discover ownerId and serviceId from the Render API.
+    Returns (owner_id, service_id) for the first web service found,
+    or uses RENDER_SERVICE_ID from .env if set.
     """
-    url = f"https://api.render.com/v1/services/{service_id}/logs"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Accept":        "application/json",
-    }
-    params = {"limit": limit}
-
+    headers = {"Authorization": f"Bearer {api_key}", "Accept": "application/json"}
     try:
-        resp = requests.get(url, headers=headers, params=params, timeout=15)
-        if resp.status_code == 200:
-            data = resp.json()
-            # Render returns {"logs": [{"message": "...", "timestamp": "..."}]}
-            if isinstance(data, dict) and "logs" in data:
-                return [(l.get("timestamp", ""), l.get("message", "")) for l in data["logs"]]
-            elif isinstance(data, list):
-                return [(l.get("timestamp", ""), l.get("message", "")) for l in data]
-        else:
-            print(f"  ⚠️  Render API {resp.status_code}: {resp.text[:200]}")
+        resp = requests.get(
+            "https://api.render.com/v1/services",
+            headers=headers,
+            params={"limit": 20},
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            print(f"  ⚠️  Render services API {resp.status_code}: {resp.text[:200]}")
+            return "", ""
+
+        services = resp.json()
+        env_service_id = os.getenv("RENDER_SERVICE_ID", "")
+
+        for item in services:
+            svc = item.get("service", {})
+            svc_id   = svc.get("id", "")
+            owner_id = svc.get("ownerId", "")
+            name     = svc.get("name", "")
+
+            # If .env has a RENDER_SERVICE_ID, match it exactly
+            if env_service_id and svc_id == env_service_id:
+                print(f"  ✅ Found service: {name} ({svc_id})")
+                return owner_id, svc_id
+
+            # Otherwise use the first web service
+            if not env_service_id and svc.get("type") == "web_service":
+                print(f"  ✅ Auto-detected service: {name} ({svc_id})")
+                return owner_id, svc_id
+
+        print("  ⚠️  No matching Render service found.")
+        return "", ""
+
     except Exception as e:
-        print(f"  ⚠️  Render log fetch failed: {e}")
-    return []
+        print(f"  ⚠️  Render service discovery failed: {e}")
+        return "", ""
+
+
+def _fetch_render_logs(owner_id: str, service_id: str, api_key: str, max_pages: int = 20) -> list:
+    """
+    Fetch all available logs from Render API using the correct v1/logs endpoint.
+    Paginates automatically. Returns list of (timestamp, message) tuples.
+    """
+    headers = {"Authorization": f"Bearer {api_key}", "Accept": "application/json"}
+    params = {
+        "ownerId":   owner_id,
+        "resource":  service_id,   # correct param name (NOT resource[])
+        "direction": "backward",
+        "limit":     500,
+    }
+
+    all_entries = []
+    for page in range(max_pages):
+        try:
+            resp = requests.get(
+                "https://api.render.com/v1/logs",
+                headers=headers,
+                params=params,
+                timeout=15,
+            )
+            if resp.status_code != 200:
+                print(f"  ⚠️  Render logs API {resp.status_code}: {resp.text[:200]}")
+                break
+
+            data = resp.json()
+            logs = data.get("logs", [])
+            all_entries.extend([(e.get("timestamp", ""), e.get("message", "")) for e in logs])
+            print(f"  📋 Page {page+1}: {len(logs)} lines (total: {len(all_entries)})")
+
+            if not data.get("hasMore") or not logs:
+                break
+
+            # Paginate using nextStartTime / nextEndTime
+            next_start = data.get("nextStartTime")
+            next_end   = data.get("nextEndTime")
+            if not next_start:
+                break
+            params["startTime"] = next_start
+            params["endTime"]   = next_end
+
+        except Exception as e:
+            print(f"  ⚠️  Render log fetch failed (page {page+1}): {e}")
+            break
+
+    return all_entries
 
 
 def _extract_click_events_from_logs(logs: list) -> dict:
@@ -196,55 +262,59 @@ def run():
 
     if not NO_RENDER:
         print(f"\n[2/4] Scanning Render logs for lost click/open events...")
-        render_api_key  = os.getenv("RENDER_API_KEY", "")
-        render_service_id = os.getenv("RENDER_SERVICE_ID", "")
+        render_api_key = os.getenv("RENDER_API_KEY", "")
 
-        if not render_api_key or not render_service_id:
-            print("  ⚠️  RENDER_API_KEY or RENDER_SERVICE_ID not set in .env")
-            print("      → Get API key from: https://dashboard.render.com/u/settings")
-            print("      → Get Service ID from the URL of your Render service")
-            print("      → Set them in .env as RENDER_API_KEY and RENDER_SERVICE_ID")
+        if not render_api_key:
+            print("  ⚠️  RENDER_API_KEY not set in .env")
+            print("      → Get it from: https://dashboard.render.com/u/settings → API Keys")
             print("      → Skipping Render log scan (use --no-render to suppress this)")
         else:
-            logs = _fetch_render_logs(render_service_id, render_api_key, limit=1000)
-            print(f"  📋 Fetched {len(logs)} log lines")
+            # Auto-discover owner ID and service ID — no manual config needed
+            print("  🔍 Auto-discovering Render service...")
+            owner_id, service_id = _discover_render_ids(render_api_key)
 
-            if logs:
-                found_events = _extract_click_events_from_logs(logs)
+            if not owner_id or not service_id:
+                print("  ⚠️  Could not find a Render service. Check RENDER_API_KEY.")
+            else:
+                logs = _fetch_render_logs(owner_id, service_id, render_api_key)
+                print(f"  📋 Total log lines fetched: {len(logs)}")
 
-                # Build email_id → row mapping from sheet
-                id_to_row = {r["email_id"]: r for r in rows if r["email_id"]}
+                if logs:
+                    found_events = _extract_click_events_from_logs(logs)
 
-                for eid, event in found_events.items():
-                    if eid in id_to_row:
-                        row = id_to_row[eid]
-                        event_type = event["type"]
-                        event_ts   = event["ts"]
+                    # Build email_id → row mapping from sheet
+                    id_to_row = {r["email_id"]: r for r in rows if r["email_id"]}
 
-                        if event_type == "click" and not row["clicked"]:
-                            print(f"\n  ✅ RECOVERY: Click for {row['name']} <{row['email']}>")
-                            print(f"     Render log timestamp: {event_ts}")
-                            try:
-                                sheet.update_cell(row["row_num"], GCOL_CLICKED, f"recovered~{event_ts[:16]}")
-                                recovered[row["email"]] = {"type": "click", "row": row}
-                                print(f"     ✅ Written to sheet row {row['row_num']}")
-                            except Exception as e:
-                                print(f"     ❌ Sheet write failed: {e}")
+                    for eid, event in found_events.items():
+                        if eid in id_to_row:
+                            row = id_to_row[eid]
+                            event_type = event["type"]
+                            event_ts   = event["ts"]
 
-                        elif event_type == "open" and not row["opened"]:
-                            print(f"\n  ✅ RECOVERY: Open for {row['name']} <{row['email']}>")
-                            try:
-                                sheet.update_cell(row["row_num"], GCOL_OPENED, f"recovered~{event_ts[:16]}")
-                                print(f"     ✅ Written to sheet row {row['row_num']}")
-                            except Exception as e:
-                                print(f"     ❌ Sheet write failed: {e}")
-                    else:
-                        print(f"  ⚠️  Found ID {eid[:8]}… in logs but NOT in sheet (orphan — safe to ignore)")
+                            if event_type == "click" and not row["clicked"]:
+                                print(f"\n  ✅ RECOVERY: Click for {row['name']} <{row['email']}>")
+                                print(f"     Render log timestamp: {event_ts}")
+                                try:
+                                    sheet.update_cell(row["row_num"], GCOL_CLICKED, f"recovered~{event_ts[:16]}")
+                                    recovered[row["email"]] = {"type": "click", "row": row}
+                                    print(f"     ✅ Written to sheet row {row['row_num']}")
+                                except Exception as e:
+                                    print(f"     ❌ Sheet write failed: {e}")
 
-                if not found_events:
-                    print("  📭 No click/open events found in Render logs")
-    else:
-        print("\n[2/4] Skipping Render log scan (--no-render flag)")
+                            elif event_type == "open" and not row["opened"]:
+                                print(f"\n  ✅ RECOVERY: Open for {row['name']} <{row['email']}>")
+                                try:
+                                    sheet.update_cell(row["row_num"], GCOL_OPENED, f"recovered~{event_ts[:16]}")
+                                    recovered[row["email"]] = {"type": "open", "row": row}
+                                    print(f"     ✅ Written to sheet row {row['row_num']}")
+                                except Exception as e:
+                                    print(f"     ❌ Sheet write failed: {e}")
+                        else:
+                            print(f"  ⚠️  Found ID {eid[:8]}… in logs but NOT in sheet (orphan)")
+
+                    if not found_events:
+                        print("  📭 No /track/open or /track/click hits in Render logs.")
+                        print("     This means opens happened while Render was cold-starting (unrecoverable from logs).")
 
     # ── 4. Hot Leads: sent but no signal ────────────────────────────
     print(f"\n[3/4] Identifying hot leads (sent + showed engagement)...")

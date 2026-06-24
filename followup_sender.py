@@ -327,8 +327,13 @@ def run(silent_mode: bool = False):
     hot_leads = _load_hot_leads(sheet)
 
     if not hot_leads:
-        if not silent_mode:
-            print("\n  📫 No hot leads found right now.")
+        rows_scanned = len(sheet.get("A2:X") or [])
+        msg = (
+            f"\n  📫 No hot leads found right now "
+            f"({rows_scanned} rows scanned). "
+            f"Leads need: sent ✅ + opened/clicked ✅ + no reply ✅ + not yet followed-up ✅"
+        )
+        print(msg)  # always print — critical for debugging
         return
 
     print(f"\n  🔥 Found {len(hot_leads)} hot lead(s) to follow up:\n")

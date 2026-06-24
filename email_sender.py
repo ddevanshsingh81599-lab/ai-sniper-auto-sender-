@@ -484,27 +484,43 @@ def _followup_loop():
         try:
             now_str = _ist_now().strftime("%H:%M IST")
             print(f"  [{now_str}] Follow-up loop: scanning for hot leads...")
-            followup_sender.run(silent_mode=True)
+            followup_sender.run(silent_mode=False)  # FIX: show output so you can debug
         except Exception as e:
+            import traceback
             print(f"  ⚠️  Follow-up loop error: {e}")
+            traceback.print_exc()
         time.sleep(FOLLOWUP_INTERVAL_SEC)
 
 
 if __name__ == "__main__":
-    # 1. Start the email tracking server (also acts as the Render health check on $PORT)
-    start_tracker_server()
+    # 1. Connect to sheet early so tracker cache is pre-loaded at startup.
+    #    This prevents cold-start cache misses where opens/clicks are silently dropped.
+    print("  📊 Pre-loading sheet for tracker cache...")
+    try:
+        _startup_sheet = _get_sheet()
+    except Exception as _e:
+        print(f"  ⚠️  Could not pre-load sheet: {_e} — tracker will use live fallback.")
+        _startup_sheet = None
 
-    # 2. Start the Reply Monitor in a background thread
+    # 2. Start the email tracking server (also acts as the Render health check on $PORT)
+    #    Pass the sheet so _load_id_cache runs immediately — no more cold-start blank opens.
+    start_tracker_server(sheet=_startup_sheet)
+
+    # 3. Start the keep-alive pinger (prevents Render cold-start data loss)
+    import keep_alive
+    keep_alive.start_keep_alive()
+
+    # 4. Start the Reply Monitor in a background thread
     import reply_monitor
     monitor_thread = threading.Thread(target=reply_monitor.run, daemon=True)
     monitor_thread.start()
     print("  🔁 Reply Monitor started in background.")
 
-    # 3. Start the Follow-up sender loop in a background thread
+    # 5. Start the Follow-up sender loop in a background thread
     #    → auto-emails anyone who opened/clicked but hasn't replied
     followup_thread = threading.Thread(target=_followup_loop, daemon=True)
     followup_thread.start()
     print("  🔥 Follow-up loop started in background (runs every 60 min).")
 
-    # 4. Start the main Sender loop in the main thread
+    # 6. Start the main Sender loop in the main thread
     run()
